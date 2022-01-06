@@ -17,6 +17,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -46,6 +47,7 @@ var (
 	disk         = flag.String("disk", "", "disk to export, on linux this would be something like '/dev/sda', and on Windows '\\\\.\\PhysicalDrive1'")
 	bufferPrefix = flag.String("buffer_prefix", "", "if set will use this local path as the local buffer prefix")
 	gcsPath      = flag.String("gcs_path", "", "GCS path to upload the image to, gs://my-bucket/image.tar.gz")
+	localPath 	 = flag.String("local_path", "", "local path to store the image file on disk, on linux this would be something like '/my_folder/linux.tar.gz', and on Windows '\\\\.\\PhysicalDrive2\buffer'. ")
 	oauth        = flag.String("oauth", "", "path to oauth json file")
 	licenses     = flag.String("licenses", "", "comma delimited list of licenses to add to the image")
 	noconfirm    = flag.Bool("y", false, "skip confirmation")
@@ -132,6 +134,20 @@ func gcsClient(ctx context.Context, oauth string) (domain.StorageClientInterface
 		option.WithCredentialsFile(oauth))
 }
 
+func createWriter(localPath string) (io.WriteCloser, string, error) {
+	var w io.WriteCloser
+	var p string
+	bufferFile, err := os.Create(localPath)
+	if err != nil {
+		return nil, "", err
+	}
+	bw := bufio.NewWriter(bufferFile)
+	w = &FileWriter{bw}
+	p = localPath
+
+	return w, p, nil
+}
+
 func gzipDisk(file *os.File, size int64, writer io.WriteCloser) error {
 	wp := &progress{}
 	gw, err := gzip.NewWriterLevel(io.MultiWriter(wp, writer), *level)
@@ -205,7 +221,18 @@ func gzipDisk(file *os.File, size int64, writer io.WriteCloser) error {
 	return nil
 }
 
-func stream(ctx context.Context, src *os.File, size int64, prefix, bkt, obj string) error {
+func stream(ctx context.Context, src *os.File, size int64, prefix string, localPath string, gcsPath string) error {
+
+	if localPath != "" {
+		writer, targetPath, _ := createWriter(localPath)
+		fmt.Printf("GCEExport: Exporting disk to %s.\n", targetPath)
+		return gzipDisk(src, size, writer)
+	}
+
+	bkt, obj, err := storageutils.GetGCSObjectPathElements(gcsPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("GCEExport: Copying %q to gs://%s/%s.\n", src.Name(), bkt, obj)
 
 	if prefix != "" {
@@ -239,17 +266,12 @@ func main() {
 	flag.Parse()
 	ctx := context.Background()
 
-	if *gcsPath == "" {
+	if *gcsPath == "" && *localPath == "" {
 		log.Fatal("The flag -gcs_path must be provided")
 	}
 
 	if *disk == "" {
 		log.Fatal("The flag -disk must be provided")
-	}
-
-	bkt, obj, err := storageutils.GetGCSObjectPathElements(*gcsPath)
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	file, err := os.Open(*disk)
@@ -277,7 +299,7 @@ func main() {
 
 	fmt.Println("GCEExport: Beginning export process...")
 	start := time.Now()
-	if err := stream(ctx, file, size, *bufferPrefix, bkt, obj); err != nil {
+	if err := stream(ctx, file, size, *bufferPrefix, *localPath, *gcsPath); err != nil {
 		log.Fatal(err)
 	}
 
